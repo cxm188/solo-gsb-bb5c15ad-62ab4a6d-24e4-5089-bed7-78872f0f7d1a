@@ -420,6 +420,52 @@ def test_chunk_upload_and_status_query_refresh_lease():
         assert state["status"] == "uploading"
 
 
+def test_get_session_after_create_returns_200_and_renews_lease():
+    """Regression: GET /uploads/{id} right after a successful create is 200.
+
+    A freshly created session must be immediately queryable; the payload
+    carries received_count / missing_chunks / last_activity / expires_at, and
+    the query itself renews the lease. Unknown ids stay 404; expired sessions
+    remain readable but are not renewed.
+    """
+    with TestClient(app) as client:
+        data, _ = _make_file(256, total_chunks=2, last_size=256)
+        session = _create(client, data, 256, idle_timeout_seconds=60)
+        sid = session["session_id"]
+
+        # The exact reported flow: create -> GET must answer 200, never 404.
+        resp = client.get(f"/uploads/{sid}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "uploading"
+        assert body["received_count"] == 0
+        assert body["missing_chunks"] == [0, 1]
+        # Lease fields are present and coherent: expires_at = last_activity + lease.
+        last = datetime.fromisoformat(body["last_activity"])
+        assert datetime.fromisoformat(body["expires_at"]) == last + timedelta(seconds=60)
+
+        # The query renews the lease (backdate first so the refresh is visible).
+        stale = datetime.now(timezone.utc) - timedelta(seconds=30)
+        _set_last_activity(sid, stale)
+        refreshed = client.get(f"/uploads/{sid}").json()
+        assert datetime.fromisoformat(refreshed["last_activity"]) > stale
+
+        # Unknown session ids still 404.
+        assert client.get("/uploads/no-such-session").status_code == 404
+
+        # Expired sessions remain readable (200) but are not renewed.
+        expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+        _set_last_activity(sid, expiry - timedelta(seconds=60))
+        assert storage.expire_idle_sessions(now=expiry) == [sid]
+        first = client.get(f"/uploads/{sid}")
+        assert first.status_code == 200
+        assert first.json()["status"] == "expired"
+        second = client.get(f"/uploads/{sid}").json()
+        assert second["last_activity"] == first.json()["last_activity"]
+        assert second["expires_at"] is None
+        assert second["expired_at"] == first.json()["expired_at"]
+
+
 def test_completed_sessions_are_never_reaped():
     with TestClient(app) as client:
         data, _ = _make_file(256, total_chunks=2, last_size=256)

@@ -471,8 +471,14 @@ def download_content(
 
 
 @app.delete("/uploads/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def abort_session(session_id: str) -> None:
-    """Abort a session: delete its chunks, metadata and (if any) merged file."""
+def abort_session(session_id: str):
+    """Abort a session: delete its chunks, metadata and (if any) merged file.
+
+    No `-> None` return annotation: fastapi < 0.117 mistakes it for a response
+    model and refuses to boot ("Status code 204 must not have a response
+    body"), which would take down the whole service on the oldest supported
+    dependency set.
+    """
     with db.connect() as conn:
         session = db.get_session(conn, session_id)
         if session is None:
